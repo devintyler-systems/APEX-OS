@@ -1,0 +1,98 @@
+{
+  "checked_at_utc": "2026-09-25T20:51:49Z",
+  "checks": [
+    {
+      "description": "Detroit Lions at Buffalo Bills final score",
+      "fields": {
+        "away_score": 31,
+        "home_score": 41
+      },
+      "game_id": "2026_02_DET_BUF",
+      "kind": "game",
+      "official_pdf_pages": [
+        1
+      ],
+      "official_pdf_sha256": "6e76c9aee29a47acc158691cc65c7af0f5c8a12fcaff688e887f4f67d9956e11",
+      "official_reference": "https://static.www.nfl.com/image/upload/v1789730127/gamecenter/a9a8944e-4feb-11f1-abca-2c54536568a9.pdf"
+    },
+    {
+      "description": "Indianapolis Colts at Kansas City Chiefs final score",
+      "fields": {
+        "away_score": 30,
+        "home_score": 33
+      },
+      "game_id": "2026_02_IND_KC",
+      "kind": "game",
+      "official_pdf_pages": [
+        1
+      ],
+      "official_pdf_sha256": "dde28094fcb4837cdfa9b058e566ce50f0daca43c74ff623c15a3dca4980113e",
+      "official_reference": "https://static.www.nfl.com/image/upload/v1789989333/gamecenter/aa048ee1-4feb-11f1-abca-2c54536568a9.pdf"
+    },
+    {
+      "description": "Patrick Mahomes passing and rushing line",
+      "fields": {
+        "attempts": 47,
+        "carries": 2,
+        "completions": 32,
+        "passing_interceptions": 0,
+        "passing_tds": 3,
+        "passing_yards": 382,
+        "rushing_tds": 0,
+        "rushing_yards": 17
+      },
+      "game_id": "2026_02_IND_KC",
+      "kind": "player",
+      "official_pdf_pages": [
+        3
+      ],
+      "official_pdf_sha256": "dde28094fcb4837cdfa9b058e566ce50f0daca43c74ff623c15a3dca4980113e",
+      "official_reference": "https://static.www.nfl.com/image/upload/v1789989333/gamecenter/aa048ee1-4feb-11f1-abca-2c54536568a9.pdf",
+      "source_player_id": "00-0033873"
+    },
+    {
+      "description": "Josh Allen passing and rushing line",
+      "fields": {
+        "attempts": 31,
+        "carries": 14,
+        "completions": 20,
+        "passing_interceptions": 0,
+        "passing_tds": 3,
+        "passing_yards": 248,
+        "rushing_tds": 2,
+        "rushing_yards": 69
+      },
+      "game_id": "2026_02_DET_BUF",
+      "kind": "player",
+      "official_pdf_pages": [
+        3
+      ],
+      "official_pdf_sha256": "6e76c9aee29a47acc158691cc65c7af0f5c8a12fcaff688e887f4f67d9956e11",
+      "official_reference": "https://static.www.nfl.com/image/upload/v1789730127/gamecenter/a9a8944e-4feb-11f1-abca-2c54536568a9.pdf",
+      "source_player_id": "00-0034857"
+    },
+    {
+      "description": "James Cook rushing and receiving line",
+      "fields": {
+        "carries": 21,
+        "receiving_tds": 0,
+        "receiving_yards": 4,
+        "receptions": 1,
+        "rushing_tds": 1,
+        "rushing_yards": 135,
+        "targets": 3
+      },
+      "game_id": "2026_02_DET_BUF",
+      "kind": "player",
+      "official_pdf_pages": [
+        3
+      ],
+      "official_pdf_sha256": "6e76c9aee29a47acc158691cc65c7af0f5c8a12fcaff688e887f4f67d9956e11",
+      "official_reference": "https://static.www.nfl.com/image/upload/v1789730127/gamecenter/a9a8944e-4feb-11f1-abca-2c54536568a9.pdf",
+      "source_player_id": "00-0037248"
+    }
+  ],
+  "evidence_version": "1.0",
+  "method": "Official NFL Game Book pages were downloaded, SHA-256 hashed, text-extracted, rendered, and visually inspected; each listed value is reconciled by the export validator against the frozen nflverse row.",
+  "raw_official_files_committed": false
+}

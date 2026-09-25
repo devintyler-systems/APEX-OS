@@ -1,102 +1,98 @@
-# In-Season Source Contract v1.1
+# In-Season Source Contract v1.2
 
-Status: approved for bounded implementation; not approved as a validated export.
+Status: validated for the retained 2026 regular-season Week 2 run only. Validation does not transfer to another retrieval, week, season, schema/parser version, or corrected upstream release.
 
-## Boundary
+## Boundary and authority
 
-This contract covers a read-only availability probe for two analytical inputs:
+The analytical inputs are schedules and weekly player statistics loaded through `nflreadpy==0.1.5` from nflverse release assets. Official NFL score pages provide the independent final-state signal, and official NFL Game Books provide the acceptance reconciliation. Injury/news, routes, charting, pressure attribution, inferred availability, projections, betting outputs, DraftOS priors, and recommendations remain out of scope.
 
-- schedules through the installed `nflreadpy`/nflverse public schedule loader;
-- weekly player data through the installed `nflreadpy`/nflverse public player-stat loader at weekly summary level.
+The pipeline is read-only upstream. Raw Parquet, HTML, and PDF inputs are retained only in ignored local `output/` paths. It does not modify DraftOS, existing scoring/projection semantics, or platform write behavior.
 
-Official NFL Game Books or Game Center remain a later reconciliation gate. NFL injury/news, routes, charting, pressure attribution, inferred availability, projections, betting outputs, and DraftOS priors are outside this contract. The probe does not write upstream rows, produce player-week records, change DraftOS, or make recommendations.
+## Observed source facts
 
-## Proposed manifest fields
+The retained live retrieval occurred at `2026-09-25T20:52:44.257459Z`:
 
-The manifest contract proposes top-level fields for `contract_version`, `season`, `generated_at_utc`, Python and installed package versions, introspected relevant loader symbols/signatures, `probe_status`, `source_availability_status`, `week_completeness_status`, `export_validation_status`, and per-dataset evidence.
+| Dataset | Loader/reference | Frame/rows | Publication metadata | Normalized SHA-256 |
+|---|---|---:|---|---|
+| schedules | `nflreadpy.load_schedules(seasons=2026)` | Polars / 272 | tag `schedules`; asset updated `2026-09-25T20:46:50Z`; asset digest `sha256:19005e44ad9eb4bfeafb5b4ebccebb1134075cdfd584cf2f3b87ee2c2141f93a` | `740e9f28fd680319611652ae1b2f49d2a399fab5d1f7642247b8d9aeea449589` |
+| weekly player data | `nflreadpy.load_player_stats(seasons=2026, summary_level='week')` | Polars / 2,294 | tag `stats_player`; asset updated `2026-09-25T14:37:31Z`; asset digest `sha256:301ff65217abd67d6eb20c3514ce640ac17d4f3eddebd5d7c356fb6aa21834ed` | `46c370d1bb2df3e5fbc34403e78cb85cf8a19c12329672076cd9c3542f2da845` |
+| official scoreboard | `https://www.nfl.com/scores/2026/week-2` | HTML / 16 distinct game cards | source publication/update time `UNKNOWN`; retrieval time is not substituted | `62a29f7e8f859218b32c754cf6ed712e0532f35a2325c48d3b0247805953549a` |
 
-Each dataset evidence object records:
+The frozen input byte hashes are `6e3269ae6228f9e925cc28b02ac5b118cc727f8218b6b04f7b282daa13ef9005` (schedules Parquet), `ce4f3ff04053ce43969132683755b1ad8c5812b80519dca3827e57a24c086e8a` (weekly Parquet), and the official HTML hash above.
 
-- `status`: `AVAILABLE` only after a supported, non-empty frame is inspected; otherwise `BLOCKED`;
-- the observed loader symbol and exact invocation, or `null` when no invocation was possible;
-- actual fully qualified frame type, observed columns, observed row count, deterministic SHA-256, and retrieval UTC timestamp;
-- `source_reference` only when directly exposed by the loader/result;
-- `source_update_metadata`, with the literal value `UNKNOWN` when the loader/result exposes none;
-- a structured block reason and error without preventing the other dataset attempt.
+Observed schedule fields include `season`, `week`, `game_type`, `game_id`, `away_team`, `home_team`, `away_score`, and `home_score`, but no trustworthy explicit final-status field. For all 272 schedule rows, `nfl_detail_id` was null. A non-null score is therefore not accepted as proof of a final game.
 
-`probe_status` is `PASS` only when both approved datasets are available and inspectable. It is not an export-quality decision. `source_availability_status` is separate so inability to determine availability is not mislabeled as either success or proven upstream absence.
+Observed weekly rows include `season`, `week`, `season_type`, `game_id`, `player_id`, `team`, and `opponent_team`. For 2026 Week 2, all 16 weekly `game_id` values joined exactly to the 16 scheduled games, and both scheduled teams were represented for every game. One Week 2 source row had a null `player_id`; it contained mixed team-level values and was excluded rather than assigned to a player.
 
-## Observed fields versus proposed downstream fields
+## V1 player output contract
 
-Observed fields are only the column names and frame facts recorded in a live local manifest. They are evidence of what the loader returned at that retrieval time; they are not frozen schema commitments. The probe intentionally does not select, rename, map, or emit player-week keys, formulas, denominators, or derived availability fields.
-
-The 2026 discovery run retrieved at `2026-09-25T19:50:25Z` observed `nflreadpy==0.1.5`, these public loaders, and these results:
-
-| Dataset | Verified invocation | Observed frame | Rows | SHA-256 |
-|---|---|---:|---:|---|
-| schedules | `nflreadpy.load_schedules(seasons=2026)` | `polars.dataframe.frame.DataFrame` | 272 | `ab1f5f75296b49e2d8bb6647441e88ce47790dc86cf8a4a093b4f89b03ad8da1` |
-| weekly player data | `nflreadpy.load_player_stats(seasons=2026, summary_level='week')` | `polars.dataframe.frame.DataFrame` | 2,294 | `46c370d1bb2df3e5fbc34403e78cb85cf8a19c12329672076cd9c3542f2da845` |
-
-The observed schedule columns were:
+`player_week.csv` is game-granular despite its historical table name. Its unique key is:
 
 ```text
-game_id, season, game_type, week, gameday, weekday, gametime, away_team,
-away_score, home_team, home_score, location, result, total, overtime,
-old_game_id, gsis, nfl_detail_id, pfr, pff, espn, ftn, away_rest, home_rest,
-away_moneyline, home_moneyline, spread_line, away_spread_odds,
-home_spread_odds, total_line, under_odds, over_odds, div_game, roof, surface,
-temp, wind, away_qb_id, home_qb_id, away_qb_name, home_qb_name, away_coach,
-home_coach, referee, stadium_id, stadium
+(season, season_type, week, game_id, source_player_id, team_abbr)
 ```
 
-The observed weekly player-data columns were:
+- `season_type` must be the literal `REG`.
+- `game_id` is the observed weekly source value and must match one schedule row.
+- `source_player_id` preserves `player_id`; null IDs are excluded and counted in the manifest.
+- `team_abbr` and `opponent_team_abbr` preserve observed source abbreviations. No numeric team ID or guessed canonical mapping is emitted.
+- A player appearing for different teams or games in one week remains in separate rows; no cross-game aggregation is performed.
+- Key fields may not be null. Non-key raw nulls serialize as empty CSV cells and are never coerced to zero.
+- Ordering is deterministic by the full key, encoded as UTF-8 with LF line endings.
+
+The compact schema contains identity fields followed by source counting fields:
 
 ```text
-player_id, player_name, player_display_name, position, position_group,
-headshot_url, season, week, season_type, game_id, team, opponent_team,
+season, week, season_type, game_id, source_player_id, player_name,
+player_display_name, position, position_group, team_abbr, opponent_team_abbr,
 completions, attempts, passing_yards, passing_tds, passing_interceptions,
-sacks_suffered, sack_yards_lost, sack_fumbles, sack_fumbles_lost,
-passing_air_yards, passing_yards_after_catch, passing_first_downs, passing_epa,
-passing_cpoe, passing_2pt_conversions, pacr, passing_10, passing_16, passing_20,
-passing_40, carries, rushing_yards, rushing_tds, rushing_fumbles,
-rushing_fumbles_lost, rushing_first_downs, rushing_epa,
-rushing_2pt_conversions, rushing_10, rushing_12, rushing_20, rushing_40,
-receptions, targets, receiving_yards, receiving_tds, receiving_fumbles,
-receiving_fumbles_lost, receiving_air_yards, receiving_yards_after_catch,
-receiving_first_downs, receiving_epa, receiving_2pt_conversions, receiving_10,
-receiving_16, receiving_20, receiving_40, racr, target_share, air_yards_share,
-wopr, special_teams_tds, def_tackles_solo, def_tackles_with_assist,
-def_tackle_assists, def_tackles_for_loss, def_tackles_for_loss_yards,
-def_fumbles_forced, def_sacks, def_sack_yards, def_qb_hits, def_interceptions,
-def_interception_yards, def_pass_defended, def_tds, def_fumbles, def_safeties,
-def_punt_blocks, def_pat_blocks, def_fg_blocks, def_2pt_atts, def_2pt_made,
-misc_yards, fumble_recovery_own, fumble_recovery_yards_own,
-fumble_recovery_opp, fumble_recovery_yards_opp, fumble_recovery_tds,
-penalties, penalty_yards, fumbles_forced_by_opp, fumbles_not_forced,
-fumbles_out_of_bounds, fumbles_total, fumbles_lost_total, punt_returns,
-punt_return_yards, kickoff_returns, kickoff_return_yards, fg_made, fg_att,
-fg_missed, fg_blocked, fg_long, fg_pct, fg_made_0_19, fg_made_20_29,
-fg_made_30_39, fg_made_40_49, fg_made_50_59, fg_made_60_, fg_missed_0_19,
-fg_missed_20_29, fg_missed_30_39, fg_missed_40_49, fg_missed_50_59,
-fg_missed_60_, fg_made_list, fg_missed_list, fg_blocked_list,
-fg_made_distance, fg_missed_distance, fg_blocked_distance, pat_made, pat_att,
-pat_missed, pat_blocked, pat_pct, gwfg_made, gwfg_att, gwfg_missed,
-gwfg_blocked, gwfg_distance, pt_att, pt_blocked, pt_long, pt_yards,
-pt_inside_20, pt_out_of_bounds, pt_downed, pt_touchback, pt_fair_caught,
-pt_returned, pt_return_yards, pt_return_tds, pt_net_yards, fantasy_points,
-fantasy_points_ppr
+sacks_suffered, sack_yards_lost, carries, rushing_yards, rushing_tds,
+receptions, targets, receiving_yards, receiving_tds, special_teams_tds,
+def_tackles_solo, def_tackle_assists, def_tackles_for_loss,
+def_fumbles_forced, def_sacks, def_qb_hits, def_interceptions,
+def_interception_yards, def_pass_defended, def_tds, def_safeties,
+fumbles_total, fumbles_lost_total, punt_returns, punt_return_yards,
+kickoff_returns, kickoff_return_yards, fg_made, fg_att, fg_missed,
+fg_blocked, fg_long, pat_made, pat_att, pat_missed, pat_blocked, pt_att,
+pt_blocked, pt_long, pt_yards, pt_inside_20
 ```
 
-For both results, the loader/result exposed no source or release URL (`source_reference: null`) and no source update/release metadata (`source_update_metadata: UNKNOWN`). Retrieval timestamps are probe evidence, not inferred source update times.
+All statistical values are raw source fields. V1 defines no derived fields, formulas, ratios, rates, shares, EPA, fantasy points, or denominators. Those fields are unsupported until separately approved and reconciled.
 
-Any future compact export schema is proposed work until its source columns have been inspected and its definitions accepted. A future export-validation gate must separately establish schema mapping, identifiers, week coverage/completeness, value semantics, reproducibility, and official NFL Game Book reconciliation.
+`team_week.csv` is not emitted. The weekly player input is not an approved complete team-stat source, and null-player rows are not a defensible substitute. Its manifest table status is `BLOCKED` with `NO_APPROVED_COMPLETE_TEAM_STAT_SOURCE`.
 
-## Metadata truthfulness
+## Week completeness rule
 
-Loader signatures are discovered from the installed module at runtime. A repository or documentation URL is not treated as release metadata. Source or release references are recorded only when directly attached to the loader/result. Missing update or release metadata stays `UNKNOWN`; it is never inferred from retrieval time, package version, GitHub history, or the season requested.
+The default gate evaluates regular-season weeks newest-first. Weeks without exact weekly game/team publication coverage are rejected without an official request; a source-complete week is selected only after its official records pass. An explicit week can be requested for audit/replay. Either mode fails closed unless all conditions hold:
 
-The generated manifest is local evidence under the ignored `output/` directory. Raw schedule or player-stat rows are never written to the repository.
+1. At least one schedule row exists, every `game_id` is non-null and unique, and only `game_type == REG` is included.
+2. The official NFL score page yields exactly the same away/home pairs as the schedule and every distinct record has explicit `gameState == FINAL`.
+3. Missing, extra, duplicated, conflicting, in-progress, postponed, or cancelled official records block the week. Scores alone never establish finality.
+4. Weekly player data contains exactly the scheduled `game_id` set, both scheduled teams for each game, and valid team/opponent associations.
+5. Identified player keys are unique and non-null. A bye creates no schedule row and no synthetic game/player row.
+6. nflverse release tag, asset URL, asset name, and asset update timestamp are present and the update timestamp is not after retrieval. `UNKNOWN` publication metadata blocks export rather than being inferred from retrieval time.
+7. Official reconciliation evidence selects exactly one source row per check, has direct official references, matches every listed value, and covers at least two games plus three players.
 
-## Acceptance boundary
+An official-record retrieval/parsing outage or conflict blocks the run and never falls back to an older week. A source-complete but explicitly non-final week is rejected as incomplete, allowing evaluation of the preceding week. The retained run rejected partially published Week 3 (1 of 16 game IDs) and selected Week 2.
 
-A successful source probe means only that the two loaders returned supported, non-empty frames that could be described and hashed. Week completeness and export validation remain visibly `NOT_EVALUATED`. A successful source probe is not a validated weekly export and is not evidence that any particular NFL week is complete.
+For the retained Week 2 run, the counts were 16 scheduled games, 16 official final records, 16 weekly-data games, 1,106 exported identified-player rows, and one excluded null-player-ID row.
+
+## Manifest and immutable runs
+
+The manifest reports separate `source_availability_status`, `week_completeness_status`, `official_record_reconciliation_status`, and `export_validation_status`. It also includes cutoff/retrieval UTC, repository SHA, schema/parser versions, source references/version/update metadata, source and output row counts/checksums, freshness evidence, game coverage, limitations, reason codes, and correction lineage.
+
+Outputs live at:
+
+```text
+data/exports/in_season/season=<season>/week=<week>/run=<content-and-code-id>/
+  player_week.csv
+  manifest.json
+```
+
+The run ID covers frozen source content, official final-state content, schema/parser versions, and repository SHA. Existing run directories are immutable: identical replay is accepted without overwrite; a byte conflict blocks. Changed source data or code produces a new run. Corrections may name `supersedes_run_id` and must include a reason.
+
+The retained replay wrote identical CSV bytes twice: SHA-256 `a9b6bd7dd637651959888df96987040f6a6196333ccf441dfcf259fed632b475`. The retained reconciliation details are in `docs/evidence/issue_1_2026_week2_reconciliation_v1.json`.
+
+## Source rights and storage decision
+
+The nflverse-data repository declares CC-BY-4.0. The compact export manifest preserves source references and provenance. Official Game Books carry restrictive NFL copyright language, so PDFs and extracted bulk content remain local and uncommitted; only limited comparison facts, URLs, page references, and hashes are retained as acceptance evidence. Bulk raw source inputs and generated exports remain ignored. The repository stores code, tests, contract documentation, and compact reconciliation metadata only.
