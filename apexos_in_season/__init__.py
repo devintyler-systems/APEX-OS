@@ -1,5 +1,6 @@
-"""Bounded, read-only source discovery for the ApexOS in-season pipeline."""
+"""Read-only source discovery and fail-closed weekly export validation."""
 
 from .source_probe import probe_sources, write_manifest
+from .weekly_export import ValidationBlocked, execute_export
 
-__all__ = ["probe_sources", "write_manifest"]
+__all__ = ["ValidationBlocked", "execute_export", "probe_sources", "write_manifest"]
