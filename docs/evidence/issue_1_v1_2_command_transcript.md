@@ -142,3 +142,7 @@ exit 0
 ```
 
 `-B` prevents test imports from rewriting tracked bytecode. One earlier full-suite run rewrote `draftos/__pycache__/config.cpython-312.pyc`; it was restored exactly from `HEAD`, and no DraftOS path is staged.
+
+## Supersession note — v1.2.1 correction
+
+This transcript is retained as historical evidence and has not been rewritten to appear as output from the corrected validator. Its commands used `cutoff_utc=2026-09-25T20:51:49Z` with frozen `retrieval_utc=2026-09-25T21:00:50.602044Z`. That as-of claim is invalid under v1.2.1 and the referenced PASS runs are superseded, including `v1-542491788447b31f`. Do not attach or analyze them as passing exports. The corrected commands, failure evidence, new run identity, hashes, and explicit supersession lineage are retained separately in `docs/evidence/issue_1_v1_2_1_correction_transcript.md`.

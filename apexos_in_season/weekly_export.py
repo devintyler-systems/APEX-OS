@@ -25,8 +25,9 @@ import requests
 from .source_probe import deterministic_frame_digest
 
 
-SCHEMA_VERSION = "1.2.0"
-PARSER_VERSION = "1.0.0"
+CONTRACT_VERSION = "1.2.1"
+SCHEMA_VERSION = "1.2.1"
+PARSER_VERSION = "1.1.0"
 UNKNOWN = "UNKNOWN"
 
 SCHEDULE_URL = (
@@ -124,7 +125,7 @@ class _OfficialLinkParser(HTMLParser):
 def utc_text(value: datetime | None = None) -> str:
     value = value or datetime.now(timezone.utc)
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
+        raise ValueError("UTC datetime must be timezone-aware")
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
@@ -138,6 +139,68 @@ def sha256_file(path: str | Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    """Serialize decision inputs to the documented stable JSON representation."""
+
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def _parse_utc_timestamp(value: Any, field: str, reason_code: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise ValidationBlocked(reason_code, f"{field} must be a non-empty UTC timestamp")
+    if re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)",
+        value,
+    ) is None:
+        raise ValidationBlocked(
+            reason_code, f"{field} must be strict ISO-8601 UTC: {value!r}"
+        )
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValidationBlocked(reason_code, f"malformed {field}: {value!r}") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValidationBlocked(reason_code, f"{field} must include a UTC timezone: {value!r}")
+    if parsed.utcoffset().total_seconds() != 0:
+        raise ValidationBlocked(reason_code, f"{field} must be UTC: {value!r}")
+    return parsed.astimezone(timezone.utc)
+
+
+def validate_knowledge_cutoff(
+    cutoff_utc: Any,
+    retrieval_utc: Any,
+    reconciliation_checked_at_utc: Any,
+) -> dict[str, str]:
+    """Ensure no evidence used by a PASS artifact post-dates its knowledge cutoff."""
+
+    cutoff = _parse_utc_timestamp(cutoff_utc, "cutoff_utc", "INVALID_CUTOFF_TIMESTAMP")
+    retrieval = _parse_utc_timestamp(
+        retrieval_utc, "retrieval_utc", "INVALID_RETRIEVAL_TIMESTAMP"
+    )
+    checked = _parse_utc_timestamp(
+        reconciliation_checked_at_utc,
+        "reconciliation checked_at_utc",
+        "INVALID_RECONCILIATION_CHECK_TIMESTAMP",
+    )
+    conflicts = []
+    if retrieval > cutoff:
+        conflicts.append(f"retrieval_utc={utc_text(retrieval)}")
+    if checked > cutoff:
+        conflicts.append(f"reconciliation_checked_at_utc={utc_text(checked)}")
+    if conflicts:
+        raise ValidationBlocked(
+            "KNOWLEDGE_CUTOFF_PRECEDES_EVIDENCE",
+            f"cutoff_utc={utc_text(cutoff)} precedes " + ", ".join(conflicts),
+        )
+    return {
+        "cutoff_utc": utc_text(cutoff),
+        "retrieval_utc": utc_text(retrieval),
+        "reconciliation_checked_at_utc": utc_text(checked),
+    }
 
 
 def _require_columns(frame: pl.DataFrame, expected: set[str], dataset: str) -> None:
@@ -187,10 +250,15 @@ def parse_official_scoreboard(document: str, season: int, week: int) -> list[dic
             "game_center_url": f"https://www.nfl.com{link['href']}",
         }
         prior = games.get(key)
-        if prior is not None and prior != item:
+        if prior is not None:
+            reason = (
+                "DUPLICATE_OFFICIAL_RECORDS"
+                if prior == item
+                else "CONFLICTING_OFFICIAL_RECORDS"
+            )
             raise ValidationBlocked(
-                "CONFLICTING_OFFICIAL_RECORDS",
-                f"conflicting official records for {key[0]} at {key[1]}",
+                reason,
+                f"repeated official records for {key[0]} at {key[1]}",
             )
         games[key] = item
     if not games:
@@ -413,11 +481,29 @@ def select_latest_published_week(
 def validate_reconciliation(
     evidence: Mapping[str, Any], schedule_week: pl.DataFrame, player_week: pl.DataFrame
 ) -> dict[str, Any]:
+    evidence_version = evidence.get("evidence_version")
+    if not isinstance(evidence_version, str) or not evidence_version:
+        raise ValidationBlocked(
+            "RECONCILIATION_EVIDENCE_INVALID", "evidence_version must be non-empty"
+        )
+    checked_at = _parse_utc_timestamp(
+        evidence.get("checked_at_utc"),
+        "reconciliation checked_at_utc",
+        "INVALID_RECONCILIATION_CHECK_TIMESTAMP",
+    )
+    try:
+        evidence_bytes = canonical_json_bytes(evidence)
+    except (TypeError, ValueError) as exc:
+        raise ValidationBlocked(
+            "RECONCILIATION_EVIDENCE_INVALID",
+            f"evidence is not canonical-JSON serializable: {exc}",
+        ) from exc
     checks = evidence.get("checks")
     if not isinstance(checks, list):
         raise ValidationBlocked("RECONCILIATION_EVIDENCE_INVALID", "checks must be a list")
     game_ids: set[str] = set()
     player_ids: set[str] = set()
+    pdf_hashes: set[str] = set()
     failures: list[str] = []
     for index, check in enumerate(checks):
         if not isinstance(check, Mapping) or not check.get("official_reference"):
@@ -426,9 +512,14 @@ def validate_reconciliation(
         kind = check.get("kind")
         game_id = str(check.get("game_id", ""))
         fields = check.get("fields")
+        pdf_hash = check.get("official_pdf_sha256")
         if not game_id or not isinstance(fields, Mapping):
             failures.append(f"check[{index}] missing game_id/fields")
             continue
+        if not isinstance(pdf_hash, str) or re.fullmatch(r"[0-9a-fA-F]{64}", pdf_hash) is None:
+            failures.append(f"check[{index}] missing valid official_pdf_sha256")
+        else:
+            pdf_hashes.add(pdf_hash.lower())
         if kind == "game":
             rows = schedule_week.filter(pl.col("game_id") == game_id)
             game_ids.add(game_id)
@@ -461,10 +552,14 @@ def validate_reconciliation(
         raise ValidationBlocked("OFFICIAL_RECONCILIATION_FAILED", "; ".join(failures))
     return {
         "status": "PASS",
-        "checked_at_utc": evidence.get("checked_at_utc", UNKNOWN),
+        "checked_at_utc": utc_text(checked_at),
+        "official_document_publication_utc": UNKNOWN,
         "game_checks": len(game_ids),
         "player_checks": len(player_ids),
-        "evidence_version": evidence.get("evidence_version", UNKNOWN),
+        "evidence_version": evidence_version,
+        "evidence_sha256": sha256_bytes(evidence_bytes),
+        "evidence_canonicalization": "JSON_SORT_KEYS_COMPACT_UTF8_V1",
+        "official_pdf_sha256": sorted(pdf_hashes),
         "references": sorted(
             {str(check["official_reference"]) for check in checks if check.get("official_reference")}
         ),
@@ -476,12 +571,9 @@ def validate_source_publication_metadata(
 ) -> dict[str, Any]:
     """Require independently obtained release identity and non-future update times."""
 
-    try:
-        retrieval = datetime.fromisoformat(retrieval_utc.replace("Z", "+00:00"))
-    except (TypeError, ValueError) as exc:
-        raise ValidationBlocked(
-            "INVALID_RETRIEVAL_TIMESTAMP", f"invalid retrieval UTC: {retrieval_utc!r}"
-        ) from exc
+    retrieval = _parse_utc_timestamp(
+        retrieval_utc, "retrieval_utc", "INVALID_RETRIEVAL_TIMESTAMP"
+    )
     checked: dict[str, Any] = {}
     for dataset in ("schedules", "weekly_player_data"):
         item = metadata.get(dataset)
@@ -499,15 +591,11 @@ def validate_source_publication_metadata(
                 "SOURCE_PUBLICATION_METADATA_UNAVAILABLE",
                 f"{dataset} metadata missing: {', '.join(missing)}",
             )
-        try:
-            updated = datetime.fromisoformat(
-                str(item["asset_updated_at"]).replace("Z", "+00:00")
-            )
-        except ValueError as exc:
-            raise ValidationBlocked(
-                "SOURCE_PUBLICATION_METADATA_INVALID",
-                f"{dataset} invalid asset_updated_at: {item['asset_updated_at']!r}",
-            ) from exc
+        updated = _parse_utc_timestamp(
+            item["asset_updated_at"],
+            f"{dataset} asset_updated_at",
+            "SOURCE_PUBLICATION_METADATA_INVALID",
+        )
         if updated > retrieval:
             raise ValidationBlocked(
                 "SOURCE_PUBLICATION_TIME_CONFLICT",
@@ -555,11 +643,12 @@ def build_manifest(
     supersedes_run_id: str | None = None,
     correction_reason: str | None = None,
     publication_freshness: Mapping[str, Any] | None = None,
+    cutoff_evidence: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     schedule = validation["schedule"]
     players = validation["player_week"]
     return {
-        "contract_version": "1.2",
+        "contract_version": CONTRACT_VERSION,
         "schema_version": SCHEMA_VERSION,
         "parser_version": PARSER_VERSION,
         "run_id": run_id,
@@ -567,6 +656,11 @@ def build_manifest(
         "week": week,
         "season_type": "REG",
         "cutoff_utc": cutoff_utc,
+        "knowledge_cutoff": {
+            "status": "PASS",
+            "rule": "cutoff is UTC and not earlier than retrieval or human review",
+            "evidence": dict(cutoff_evidence or {}),
+        },
         "retrieval_utc": sources.retrieval_utc,
         "repository_sha": repository_head,
         "source_availability_status": "AVAILABLE",
@@ -574,6 +668,9 @@ def build_manifest(
         "official_record_reconciliation_status": reconciliation["status"],
         "export_validation_status": "PASS",
         "source_metadata": sources.source_metadata,
+        "source_metadata_sha256": sha256_bytes(
+            canonical_json_bytes(sources.source_metadata)
+        ),
         "week_selection": dict(sources.selection_evidence),
         "source_evidence": {
             "schedules": {
@@ -661,10 +758,9 @@ def persist_validated_export(
             raise ValidationBlocked(
                 "IMMUTABLE_RUN_CONFLICT", f"existing player export differs: {player_path}"
             )
-        existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if existing_manifest.get("tables", {}).get("player_week", {}).get("sha256") != sha256_bytes(player_csv):
+        if manifest_path.read_bytes() != manifest_bytes:
             raise ValidationBlocked(
-                "IMMUTABLE_RUN_CONFLICT", f"existing manifest checksum differs: {manifest_path}"
+                "IMMUTABLE_RUN_CONFLICT", f"existing manifest bytes differ: {manifest_path}"
             )
         return manifest_path, True
     destination.mkdir(parents=True, exist_ok=False)
@@ -690,6 +786,17 @@ def execute_export(
             "SELECTED_WEEK_MISMATCH",
             f"retrieval selected week {sources.selected_week}, export requested week {week}",
         )
+    if bool(supersedes_run_id) != bool(correction_reason):
+        raise ValidationBlocked(
+            "CORRECTION_LINEAGE_INCOMPLETE",
+            "supersedes_run_id and correction_reason must be supplied together",
+        )
+    cutoff_evidence = validate_knowledge_cutoff(
+        cutoff_utc,
+        sources.retrieval_utc,
+        reconciliation_evidence.get("checked_at_utc"),
+    )
+    normalized_cutoff = cutoff_evidence["cutoff_utc"]
     publication_freshness = validate_source_publication_metadata(
         sources.source_metadata, sources.retrieval_utc
     )
@@ -702,16 +809,23 @@ def execute_export(
     )
     player_csv = _csv_bytes(validation["player_week"], PLAYER_WEEK_COLUMNS)
     repository_head = repository_sha(repository_root)
-    fingerprint = sha256_bytes(
-        (
-            deterministic_frame_digest(sources.schedules)
-            + deterministic_frame_digest(sources.weekly)
-            + sha256_bytes(sources.official_html.encode("utf-8"))
-            + SCHEMA_VERSION
-            + PARSER_VERSION
-            + repository_head
-        ).encode("ascii")
-    )
+    fingerprint = sha256_bytes(canonical_json_bytes({
+        "schedule_sha256": deterministic_frame_digest(sources.schedules),
+        "weekly_sha256": deterministic_frame_digest(sources.weekly),
+        "official_scoreboard_sha256": sha256_bytes(sources.official_html.encode("utf-8")),
+        "reconciliation_evidence_sha256": reconciliation["evidence_sha256"],
+        "source_metadata": sources.source_metadata,
+        "cutoff_utc": normalized_cutoff,
+        "correction_lineage": {
+            "supersedes_run_id": supersedes_run_id,
+            "reason": correction_reason,
+        },
+        "player_csv_sha256": sha256_bytes(player_csv),
+        "schema_version": SCHEMA_VERSION,
+        "parser_version": PARSER_VERSION,
+        "contract_version": CONTRACT_VERSION,
+        "repository_sha": repository_head,
+    }))
     run_id = f"v1-{fingerprint[:16]}"
     manifest = build_manifest(
         season=season,
@@ -722,10 +836,11 @@ def execute_export(
         player_csv=player_csv,
         repository_head=repository_head,
         run_id=run_id,
-        cutoff_utc=cutoff_utc,
+        cutoff_utc=normalized_cutoff,
         supersedes_run_id=supersedes_run_id,
         correction_reason=correction_reason,
         publication_freshness=publication_freshness,
+        cutoff_evidence=cutoff_evidence,
     )
     manifest_path, replay = persist_validated_export(output_root, manifest, player_csv)
     return manifest, manifest_path, replay

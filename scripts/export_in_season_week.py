@@ -47,7 +47,13 @@ def _parser() -> argparse.ArgumentParser:
         "--output-root", type=Path,
         default=ROOT / "data" / "exports" / "in_season",
     )
-    parser.add_argument("--cutoff-utc", help="ISO-8601 cutoff (default: run start UTC).")
+    parser.add_argument(
+        "--cutoff-utc",
+        help=(
+            "Timezone-aware UTC knowledge cutoff; must not precede retrieval or "
+            "human review (default: UTC after retrieval completes)."
+        ),
+    )
     parser.add_argument("--supersedes-run-id")
     parser.add_argument("--correction-reason")
     return parser
@@ -55,7 +61,6 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _parser().parse_args()
-    cutoff = args.cutoff_utc or utc_text(datetime.now(timezone.utc))
     try:
         if str(args.week).lower() == "latest":
             requested_week = None
@@ -100,6 +105,7 @@ def main() -> int:
         evidence = json.loads(
             args.reconciliation_evidence.read_text(encoding="utf-8")
         )
+        cutoff = args.cutoff_utc or utc_text(datetime.now(timezone.utc))
         manifest, path, replay = execute_export(
             sources=sources,
             reconciliation_evidence=evidence,
