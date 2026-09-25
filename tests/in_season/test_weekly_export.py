@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -114,23 +116,28 @@ def _evidence():
         "checks": [
             {
                 "kind": "game", "game_id": "g1", "official_reference": "https://nfl/g1",
+                "official_pdf_sha256": "a" * 64,
                 "fields": {"away_score": 31, "home_score": 41},
             },
             {
                 "kind": "game", "game_id": "g2", "official_reference": "https://nfl/g2",
+                "official_pdf_sha256": "b" * 64,
                 "fields": {"away_score": 30, "home_score": 33},
             },
             {
                 "kind": "player", "game_id": "g1", "source_player_id": "p1",
-                "official_reference": "https://nfl/g1", "fields": {"attempts": 38},
+                "official_reference": "https://nfl/g1", "official_pdf_sha256": "a" * 64,
+                "fields": {"attempts": 38},
             },
             {
                 "kind": "player", "game_id": "g1", "source_player_id": "p2",
-                "official_reference": "https://nfl/g1", "fields": {"attempts": 31},
+                "official_reference": "https://nfl/g1", "official_pdf_sha256": "a" * 64,
+                "fields": {"attempts": 31},
             },
             {
                 "kind": "player", "game_id": "g2", "source_player_id": "p4",
-                "official_reference": "https://nfl/g2", "fields": {"attempts": 47},
+                "official_reference": "https://nfl/g2", "official_pdf_sha256": "b" * 64,
+                "fields": {"attempts": 47},
             },
         ],
     }
@@ -173,6 +180,27 @@ def test_official_parser_reads_explicit_final_state_and_game_id():
         ("DET", "BUF", "FINAL"), ("IND", "KC", "FINAL")
     ]
     assert {game["official_game_id"] for game in parsed} == {"official-1", "official-2"}
+
+
+@pytest.mark.parametrize(
+    ("duplicate_id", "duplicate_state", "reason_code"),
+    [
+        ("official-1", "FINAL", "DUPLICATE_OFFICIAL_RECORDS"),
+        ("different-id", "FINAL", "CONFLICTING_OFFICIAL_RECORDS"),
+    ],
+)
+def test_repeated_official_cards_always_block(
+    duplicate_id, duplicate_state, reason_code
+):
+    duplicate = (
+        '<a href="/games/lions-at-bills-2026-reg-2" '
+        'data-analytics="{&quot;gameId&quot;:&quot;'
+        f'{duplicate_id}&quot;,&quot;gameState&quot;:&quot;{duplicate_state}&quot;}}">'
+        "duplicate</a>"
+    )
+    with pytest.raises(ValidationBlocked) as caught:
+        parse_official_scoreboard(_official_html() + duplicate, 2026, 2)
+    assert caught.value.reason_code == reason_code
 
 
 def test_complete_week_requires_exact_game_and_team_coverage():
@@ -336,6 +364,147 @@ def test_reconciliation_mismatch_prevents_false_pass():
     assert caught.value.reason_code == "OFFICIAL_RECONCILIATION_FAILED"
 
 
+def test_cutoff_before_retrieval_blocks_without_writing_export(tmp_path):
+    output_root = tmp_path / "blocked"
+    with pytest.raises(ValidationBlocked) as caught:
+        execute_export(
+            sources=_sources(), reconciliation_evidence=_evidence(), season=2026,
+            week=2, output_root=output_root, repository_root=tmp_path,
+            cutoff_utc="2026-09-25T20:12:25Z",
+        )
+    assert caught.value.reason_code == "KNOWLEDGE_CUTOFF_PRECEDES_EVIDENCE"
+    assert not output_root.exists()
+
+
+@pytest.mark.parametrize(
+    "cutoff",
+    [
+        "not-a-timestamp",
+        "2026-09-25T20:12:26",
+        "2026-09-25 20:12:26Z",
+        "2026-09-25T21:12:26+01:00",
+    ],
+)
+def test_malformed_or_timezone_naive_cutoff_blocks(cutoff, tmp_path):
+    output_root = tmp_path / "blocked"
+    with pytest.raises(ValidationBlocked) as caught:
+        execute_export(
+            sources=_sources(), reconciliation_evidence=_evidence(), season=2026,
+            week=2, output_root=output_root, repository_root=tmp_path,
+            cutoff_utc=cutoff,
+        )
+    assert caught.value.reason_code == "INVALID_CUTOFF_TIMESTAMP"
+    assert not output_root.exists()
+
+
+def test_changed_reconciliation_value_fails_before_persistence(tmp_path):
+    evidence = _evidence()
+    evidence["checks"][2]["fields"]["attempts"] = 99
+    output_root = tmp_path / "blocked"
+    with pytest.raises(ValidationBlocked) as caught:
+        execute_export(
+            sources=_sources(), reconciliation_evidence=evidence, season=2026,
+            week=2, output_root=output_root, repository_root=tmp_path,
+            cutoff_utc=NOW,
+        )
+    assert caught.value.reason_code == "OFFICIAL_RECONCILIATION_FAILED"
+    assert not output_root.exists()
+
+
+def test_reconciliation_digest_covers_references_hashes_review_time_and_version(tmp_path):
+    evidence = _evidence()
+    expected = hashlib.sha256(
+        json.dumps(
+            evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    manifest, _, _ = execute_export(
+        sources=_sources(), reconciliation_evidence=evidence, season=2026, week=2,
+        output_root=tmp_path, repository_root=tmp_path, cutoff_utc=NOW,
+    )
+    reconciliation = manifest["official_reconciliation"]
+    assert reconciliation["evidence_sha256"] == expected
+    assert reconciliation["official_pdf_sha256"] == ["a" * 64, "b" * 64]
+    assert reconciliation["official_document_publication_utc"] == "UNKNOWN"
+
+
+def test_decision_input_changes_cannot_reuse_prior_run(tmp_path):
+    root = tmp_path / "runs"
+    base_evidence = _evidence()
+    base, _, base_replay = execute_export(
+        sources=_sources(), reconciliation_evidence=base_evidence, season=2026, week=2,
+        output_root=root, repository_root=tmp_path, cutoff_utc=NOW,
+    )
+    assert base_replay is False
+
+    variants = []
+    changed = copy.deepcopy(base_evidence)
+    changed["checks"][0]["official_reference"] = "https://nfl/changed"
+    variants.append(changed)
+    changed = copy.deepcopy(base_evidence)
+    changed["checks"][0]["official_pdf_sha256"] = "c" * 64
+    variants.append(changed)
+    changed = copy.deepcopy(base_evidence)
+    changed["checked_at_utc"] = "2026-09-25T20:12:25Z"
+    variants.append(changed)
+    changed = copy.deepcopy(base_evidence)
+    changed["evidence_version"] = "test-2"
+    variants.append(changed)
+
+    for evidence in variants:
+        manifest, _, replay = execute_export(
+            sources=_sources(), reconciliation_evidence=evidence, season=2026, week=2,
+            output_root=root, repository_root=tmp_path, cutoff_utc=NOW,
+        )
+        assert replay is False
+        assert manifest["run_id"] != base["run_id"]
+
+    changed_cutoff, _, cutoff_replay = execute_export(
+        sources=_sources(), reconciliation_evidence=base_evidence, season=2026, week=2,
+        output_root=root, repository_root=tmp_path,
+        cutoff_utc="2026-09-25T20:12:27Z",
+    )
+    assert cutoff_replay is False
+    assert changed_cutoff["run_id"] != base["run_id"]
+
+    corrected, _, correction_replay = execute_export(
+        sources=_sources(), reconciliation_evidence=base_evidence, season=2026, week=2,
+        output_root=root, repository_root=tmp_path, cutoff_utc=NOW,
+        supersedes_run_id="old-run", correction_reason="cutoff correction",
+    )
+    assert correction_replay is False
+    assert corrected["run_id"] != base["run_id"]
+
+    changed_lineage, _, changed_lineage_replay = execute_export(
+        sources=_sources(), reconciliation_evidence=base_evidence, season=2026, week=2,
+        output_root=root, repository_root=tmp_path, cutoff_utc=NOW,
+        supersedes_run_id="old-run", correction_reason="different correction reason",
+    )
+    assert changed_lineage_replay is False
+    assert changed_lineage["run_id"] != corrected["run_id"]
+
+    changed_sources = _sources()
+    metadata = copy.deepcopy(changed_sources.source_metadata)
+    metadata["schedules"]["asset_digest"] = "sha256:changed"
+    changed_sources = RetrievedSources(
+        schedules=changed_sources.schedules,
+        weekly=changed_sources.weekly,
+        official_html=changed_sources.official_html,
+        source_metadata=metadata,
+        retrieval_utc=changed_sources.retrieval_utc,
+        input_references=changed_sources.input_references,
+        selected_week=changed_sources.selected_week,
+        selection_evidence=changed_sources.selection_evidence,
+    )
+    changed_metadata_manifest, _, metadata_replay = execute_export(
+        sources=changed_sources, reconciliation_evidence=base_evidence,
+        season=2026, week=2, output_root=root, repository_root=tmp_path,
+        cutoff_utc=NOW,
+    )
+    assert metadata_replay is False
+    assert changed_metadata_manifest["run_id"] != base["run_id"]
+
+
 def test_deterministic_csv_and_replay_checksums(tmp_path):
     kwargs = dict(
         sources=_sources(), reconciliation_evidence=_evidence(), season=2026, week=2,
@@ -352,9 +521,26 @@ def test_deterministic_csv_and_replay_checksums(tmp_path):
     assert (first_path.parent / "player_week.csv").read_bytes() == (
         second_path.parent / "player_week.csv"
     ).read_bytes()
+    assert first_path.read_bytes() == second_path.read_bytes()
     _, same_path, replay = execute_export(output_root=tmp_path / "first", **kwargs)
     assert replay is True
     assert same_path == first_path
+
+
+def test_existing_run_with_unchanged_csv_and_altered_manifest_blocks(tmp_path):
+    kwargs = dict(
+        sources=_sources(), reconciliation_evidence=_evidence(), season=2026, week=2,
+        output_root=tmp_path, repository_root=tmp_path, cutoff_utc=NOW,
+    )
+    _, manifest_path, _ = execute_export(**kwargs)
+    altered = manifest_path.read_text(encoding="utf-8").replace(
+        '"export_validation_status": "PASS"',
+        '"export_validation_status": "BLOCKED"',
+    )
+    manifest_path.write_text(altered, encoding="utf-8", newline="\n")
+    with pytest.raises(ValidationBlocked) as caught:
+        execute_export(**kwargs)
+    assert caught.value.reason_code == "IMMUTABLE_RUN_CONFLICT"
 
 
 def test_manifest_has_separate_gates_no_derived_denominators_and_blocked_team_table(tmp_path):

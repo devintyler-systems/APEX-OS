@@ -1,6 +1,6 @@
-# In-Season Source Contract v1.2
+# In-Season Source Contract v1.2.1
 
-Status: validated for the retained 2026 regular-season Week 2 run only. Validation does not transfer to another retrieval, week, season, schema/parser version, or corrected upstream release.
+Status: corrected validation contract. The earlier v1.2 Week 2 run is superseded because its claimed cutoff preceded frozen retrieval. A passing v1.2.1 artifact must satisfy the cutoff and immutable-replay rules below; validation never transfers to another retrieval, week, season, schema/parser version, or corrected upstream release.
 
 ## Boundary and authority
 
@@ -67,11 +67,12 @@ The default gate evaluates regular-season weeks newest-first. Weeks without exac
 
 1. At least one schedule row exists, every `game_id` is non-null and unique, and only `game_type == REG` is included.
 2. The official NFL score page yields exactly the same away/home pairs as the schedule and every distinct record has explicit `gameState == FINAL`.
-3. Missing, extra, duplicated, conflicting, in-progress, postponed, or cancelled official records block the week. Scores alone never establish finality.
+3. Missing, extra, repeated (even byte-for-byte identical), conflicting, in-progress, postponed, or cancelled official records block the week. Scores alone never establish finality.
 4. Weekly player data contains exactly the scheduled `game_id` set, both scheduled teams for each game, and valid team/opponent associations.
 5. Identified player keys are unique and non-null. A bye creates no schedule row and no synthetic game/player row.
 6. nflverse release tag, asset URL, asset name, and asset update timestamp are present and the update timestamp is not after retrieval. `UNKNOWN` publication metadata blocks export rather than being inferred from retrieval time.
 7. Official reconciliation evidence selects exactly one source row per check, has direct official references, matches every listed value, and covers at least two games plus three players.
+8. `cutoff_utc`, frozen `retrieval_utc`, and reconciliation `checked_at_utc` must be well-formed, timezone-aware UTC values. The cutoff must be at or after both retrieval and human review. A missing timezone, malformed value, or evidence after the cutoff blocks before persistence.
 
 An official-record retrieval/parsing outage or conflict blocks the run and never falls back to an older week. A source-complete but explicitly non-final week is rejected as incomplete, allowing evaluation of the preceding week. The retained run rejected partially published Week 3 (1 of 16 game IDs) and selected Week 2.
 
@@ -79,7 +80,9 @@ For the retained Week 2 run, the counts were 16 scheduled games, 16 official fin
 
 ## Manifest and immutable runs
 
-The manifest reports separate `source_availability_status`, `week_completeness_status`, `official_record_reconciliation_status`, and `export_validation_status`. It also includes cutoff/retrieval UTC, repository SHA, schema/parser versions, source references/version/update metadata, source and output row counts/checksums, freshness evidence, game coverage, limitations, reason codes, and correction lineage.
+The manifest reports separate `source_availability_status`, `week_completeness_status`, `official_record_reconciliation_status`, and `export_validation_status`. It also includes cutoff/retrieval/review UTC, repository SHA, schema/parser versions, source references/version/update metadata, source and output row counts/checksums, freshness evidence, game coverage, limitations, reason codes, and correction lineage.
+
+The knowledge cutoff is an as-of claim, not a run label. It must be no earlier than every input retrieval whose earlier state cannot be independently proven. nflverse asset update timestamps remain separate publication metadata and are never substituted for retrieval time. Game Book `checked_at_utc` records when a human reviewed the document. The official document publication time remains `UNKNOWN` unless independently exposed; neither review time nor retrieval time is relabeled as publication time.
 
 Outputs live at:
 
@@ -89,9 +92,13 @@ data/exports/in_season/season=<season>/week=<week>/run=<content-and-code-id>/
   manifest.json
 ```
 
-The run ID covers frozen source content, official final-state content, schema/parser versions, and repository SHA. Existing run directories are immutable: identical replay is accepted without overwrite; a byte conflict blocks. Changed source data or code produces a new run. Corrections may name `supersedes_run_id` and must include a reason.
+The run ID covers frozen source content, official final-state content, the canonical reconciliation-evidence digest, claimed cutoff, full source publication metadata, correction lineage, output checksum, schema/parser versions, and repository SHA. Reconciliation evidence uses sorted-key compact UTF-8 JSON (`JSON_SORT_KEYS_COMPACT_UTF8_V1`); its digest therefore binds evidence version, review time, official references, PDF hashes, and reviewed values.
 
-The retained replay wrote identical CSV bytes twice: SHA-256 `a9b6bd7dd637651959888df96987040f6a6196333ccf441dfcf259fed632b475`. The retained reconciliation details are in `docs/evidence/issue_1_2026_week2_reconciliation_v1.json`.
+Existing run directories are immutable. `replay_identical=true` is permitted only when both `player_week.csv` and the complete newly constructed `manifest.json` are byte-identical to stored files. Any difference blocks with `IMMUTABLE_RUN_CONFLICT`; files are never overwritten. Changed evidence, cutoff, source metadata, correction lineage, source data, or code produces a distinct run identity.
+
+The prior `v1-542491788447b31f` run and its earlier-cutoff predecessors are historical artifacts, not valid v1.2.1 PASS evidence. They must not be edited in place. The corrected run names the former run in `supersedes_run_id`. Reconciliation details remain versioned in `docs/evidence/issue_1_2026_week2_reconciliation_v1.json`.
+
+The validator compares the manually reviewed values stored in that versioned evidence file against schedule/player source rows. On replay it validates the recorded references and PDF SHA-256 strings and binds them into the evidence digest; it does not fetch or independently hash every referenced Game Book PDF. Human review and custody of the recorded PDF hashes remain an operational acceptance step.
 
 ## Source rights and storage decision
 
