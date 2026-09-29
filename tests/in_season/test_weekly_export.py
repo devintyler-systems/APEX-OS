@@ -11,7 +11,10 @@ import polars as pl
 import pytest
 
 from apexos_in_season.weekly_export import (
+    CONTRACT_VERSION,
+    LEGACY_SCOREBOARD_CONTRACT_VERSION,
     PLAYER_WEEK_COLUMNS,
+    SCOREBOARD_RULE_ID,
     RetrievedSources,
     ValidationBlocked,
     _csv_bytes,
@@ -30,6 +33,11 @@ from apexos_in_season.weekly_export import (
 
 
 NOW = "2026-09-25T20:12:26Z"
+SCOREBOARD_FIXTURES = Path(__file__).parent / "fixtures" / "scoreboard"
+
+
+def _scoreboard_fixture(name: str) -> str:
+    return (SCOREBOARD_FIXTURES / name).read_text(encoding="utf-8")
 
 
 def _schedule(rows=None):
@@ -182,25 +190,77 @@ def test_official_parser_reads_explicit_final_state_and_game_id():
     assert {game["official_game_id"] for game in parsed} == {"official-1", "official-2"}
 
 
+def test_sparse_alias_is_order_independent_and_not_emitted_as_game():
+    complete_first = parse_official_scoreboard(
+        _scoreboard_fixture("accepted_complete_sparse.html"), 2026, 3
+    )
+    sparse_first = parse_official_scoreboard(
+        _scoreboard_fixture("accepted_sparse_complete.html"), 2026, 3
+    )
+    assert complete_first == sparse_first
+    assert len(complete_first) == 1
+    game = complete_first[0]
+    assert (game["away_team"], game["home_team"]) == ("ATL", "GB")
+    assert game["official_game_id"] == "atl-gb"
+    assert game["state"] == "FINAL"
+    assert len(game["parser_evidence"]) == 2
+    assert [item["record_type"] for item in game["parser_evidence"]] == [
+        "complete_record", "sparse_alias_record"
+    ]
+    assert game["parser_evidence"][1]["role"] == "alias_of:atl-gb"
+    assert game["parser_evidence"][1]["alias_counted_as_game"] is False
+
+
+def test_one_complete_link_is_the_accepted_baseline():
+    parsed = parse_official_scoreboard(
+        _scoreboard_fixture("accepted_complete_alone.html"), 2026, 3
+    )
+    assert len(parsed) == 1
+    assert len(parsed[0]["parser_evidence"]) == 1
+    assert parsed[0]["parser_evidence"][0]["record_type"] == "complete_record"
+
+
 @pytest.mark.parametrize(
-    ("duplicate_id", "duplicate_state", "reason_code"),
+    ("fixture_name", "reason_code"),
     [
-        ("official-1", "FINAL", "DUPLICATE_OFFICIAL_RECORDS"),
-        ("different-id", "FINAL", "CONFLICTING_OFFICIAL_RECORDS"),
+        ("blocked_dup_two_complete.html", "DUP_TWO_COMPLETE"),
+        ("blocked_dup_distinct_nonnull_ids.html", "DUP_DISTINCT_NONNULL_IDS"),
+        ("blocked_dup_state_mismatch.html", "DUP_STATE_MISMATCH"),
+        ("blocked_dup_href_or_team_mismatch.html", "DUP_HREF_OR_TEAM_MISMATCH"),
+        ("blocked_dup_alias_only.html", "DUP_ALIAS_ONLY"),
+        ("blocked_dup_alias_state_blank.html", "DUP_ALIAS_STATE_BLANK"),
+        ("blocked_dup_gameid_not_week_unique.html", "DUP_GAMEID_NOT_WEEK_UNIQUE"),
+        ("blocked_dup_two_sparse.html", "DUP_TWO_SPARSE"),
+        ("blocked_analytics_malformed.html", "ANALYTICS_MALFORMED"),
+        ("blocked_unexpected_extra_link.html", "UNEXPECTED_EXTRA_LINK"),
     ],
 )
-def test_repeated_official_cards_always_block(
-    duplicate_id, duplicate_state, reason_code
-):
-    duplicate = (
-        '<a href="/games/lions-at-bills-2026-reg-2" '
-        'data-analytics="{&quot;gameId&quot;:&quot;'
-        f'{duplicate_id}&quot;,&quot;gameState&quot;:&quot;{duplicate_state}&quot;}}">'
-        "duplicate</a>"
-    )
+def test_scoreboard_contract_blocks_each_stable_reason(fixture_name, reason_code):
     with pytest.raises(ValidationBlocked) as caught:
-        parse_official_scoreboard(_official_html() + duplicate, 2026, 2)
+        parse_official_scoreboard(_scoreboard_fixture(fixture_name), 2026, 3)
     assert caught.value.reason_code == reason_code
+
+
+def test_old_contract_rejects_fixture_that_new_contract_accepts():
+    document = _scoreboard_fixture("accepted_complete_sparse.html")
+    with pytest.raises(ValidationBlocked) as caught:
+        parse_official_scoreboard(
+            document, 2026, 3, contract_version=LEGACY_SCOREBOARD_CONTRACT_VERSION
+        )
+    assert caught.value.reason_code == "CONFLICTING_OFFICIAL_RECORDS"
+    assert CONTRACT_VERSION == "1.3.0"
+    assert len(parse_official_scoreboard(document, 2026, 3)) == 1
+
+
+def test_synthetic_sixteen_game_week_emits_sixteen_games_and_32_evidence_records():
+    parsed = parse_official_scoreboard(
+        _scoreboard_fixture("accepted_16_game_week.html"), 2026, 3
+    )
+    evidence = [item for game in parsed for item in game["parser_evidence"]]
+    assert len(parsed) == 16
+    assert len(evidence) == 32
+    assert sum(item["record_type"] == "sparse_alias_record" for item in evidence) == 16
+    assert all(game["official_game_id"] is not None for game in parsed)
 
 
 def test_complete_week_requires_exact_game_and_team_coverage():
@@ -555,6 +615,9 @@ def test_manifest_has_separate_gates_no_derived_denominators_and_blocked_team_ta
     assert manifest["derived_fields"] == []
     assert manifest["denominator_policy"] == "NOT_APPLICABLE_NO_DERIVED_FIELDS"
     assert manifest["tables"]["team_week"]["status"] == "BLOCKED"
+    scoreboard = manifest["source_evidence"]["official_scoreboard"]
+    assert scoreboard["parser_rule_id"] == SCOREBOARD_RULE_ID
+    assert len(scoreboard["parser_evidence"]) == 2
 
 
 def test_freeze_and_replay_detects_corrections_or_corruption(tmp_path):

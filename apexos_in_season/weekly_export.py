@@ -25,9 +25,11 @@ import requests
 from .source_probe import deterministic_frame_digest
 
 
-CONTRACT_VERSION = "1.2.1"
+CONTRACT_VERSION = "1.3.0"
 SCHEMA_VERSION = "1.2.1"
-PARSER_VERSION = "1.1.0"
+PARSER_VERSION = "1.2.0"
+LEGACY_SCOREBOARD_CONTRACT_VERSION = "1.2.1"
+SCOREBOARD_RULE_ID = "SB-DUP-EXC-1"
 UNKNOWN = "UNKNOWN"
 
 SCHEDULE_URL = (
@@ -212,8 +214,10 @@ def _require_columns(frame: pl.DataFrame, expected: set[str], dataset: str) -> N
         )
 
 
-def parse_official_scoreboard(document: str, season: int, week: int) -> list[dict[str, str]]:
-    """Parse official NFL Game Center links and their explicit gameState values."""
+def _parse_official_scoreboard_v1_2_1(
+    document: str, season: int, week: int
+) -> list[dict[str, Any]]:
+    """Retain the v1.2.1 fail-closed behavior for contract regression tests."""
 
     parser = _OfficialLinkParser()
     parser.feed(document)
@@ -267,6 +271,273 @@ def parse_official_scoreboard(document: str, season: int, week: int) -> list[dic
             f"no official regular-season week {week} game records were parsed",
         )
     return [games[key] for key in sorted(games)]
+
+
+def _normalize_analytics_team(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationBlocked(
+            "ANALYTICS_MALFORMED", "analytics team field must be a nonblank string"
+        )
+    normalized = value.strip()
+    slug = normalized.lower()
+    if slug in TEAM_SLUG_TO_ABBR:
+        return TEAM_SLUG_TO_ABBR[slug]
+    abbreviation = normalized.upper()
+    if abbreviation in set(TEAM_SLUG_TO_ABBR.values()):
+        return abbreviation
+    return normalized
+
+
+def _analytics_team_fields(analytics: Mapping[str, Any]) -> dict[str, str]:
+    """Return optional analytics team fields without inventing missing values."""
+
+    aliases = {
+        "away_team": ("awayTeam", "away_team", "awayTeamAbbr", "away_team_abbr"),
+        "home_team": ("homeTeam", "home_team", "homeTeamAbbr", "home_team_abbr"),
+    }
+    result: dict[str, str] = {}
+    for output_name, keys in aliases.items():
+        observed = {
+            normalized
+            for key in keys
+            if key in analytics
+            for normalized in [_normalize_analytics_team(analytics[key])]
+            if normalized is not None
+        }
+        if len(observed) > 1:
+            raise ValidationBlocked(
+                "ANALYTICS_MALFORMED",
+                f"analytics fields disagree for {output_name}: {sorted(observed)}",
+            )
+        if observed:
+            result[output_name] = next(iter(observed))
+    return result
+
+
+def _scoreboard_evidence_record(
+    record: Mapping[str, Any], *, role: str, alias_counted_as_game: bool
+) -> dict[str, Any]:
+    return {
+        "record_type": record["record_type"],
+        "role": role,
+        "href": record["href"],
+        "away_team": record["away_team"],
+        "home_team": record["home_team"],
+        "game_id": record["game_id"],
+        "alternate_game_id": record["alternate_game_id"],
+        "game_state": record["state"],
+        "analytics_sha256": record["analytics_sha256"],
+        "alias_counted_as_game": alias_counted_as_game,
+    }
+
+
+def _parse_official_scoreboard_v1_3_0(
+    document: str, season: int, week: int
+) -> list[dict[str, Any]]:
+    """Apply SB-DUP-EXC-1 without depending on DOM link order."""
+
+    parser = _OfficialLinkParser()
+    parser.feed(document)
+    suffix = f"-{season}-reg-{week}"
+    pattern = re.compile(rf"^/games/([a-z0-9-]+)-at-([a-z0-9-]+){re.escape(suffix)}$")
+    selected_links = [link for link in parser.links if pattern.fullmatch(link["href"])]
+    records: list[dict[str, Any]] = []
+    for link in selected_links:
+        match = pattern.fullmatch(link["href"])
+        assert match is not None
+        away_slug, home_slug = match.groups()
+        if away_slug not in TEAM_SLUG_TO_ABBR or home_slug not in TEAM_SLUG_TO_ABBR:
+            raise ValidationBlocked(
+                "UNKNOWN_OFFICIAL_TEAM_SLUG",
+                f"unmapped official Game Center slug: {away_slug}-at-{home_slug}",
+            )
+        try:
+            decoded = html.unescape(link["data_analytics"])
+            analytics = json.loads(decoded)
+        except (TypeError, ValueError) as exc:
+            raise ValidationBlocked(
+                "ANALYTICS_MALFORMED", f"invalid data-analytics JSON: {exc}"
+            ) from exc
+        if not isinstance(analytics, Mapping):
+            raise ValidationBlocked(
+                "ANALYTICS_MALFORMED", "data-analytics JSON must be an object"
+            )
+
+        key = (TEAM_SLUG_TO_ABBR[away_slug], TEAM_SLUG_TO_ABBR[home_slug])
+        declared_teams = _analytics_team_fields(analytics)
+        for field, expected in zip(("away_team", "home_team"), key):
+            if field in declared_teams and declared_teams[field] != expected:
+                raise ValidationBlocked(
+                    "DUP_HREF_OR_TEAM_MISMATCH",
+                    f"{field} disagrees with href for {link['href']}",
+                )
+
+        state = analytics.get("gameState")
+        game_id_present = "gameId" in analytics
+        raw_game_id = analytics.get("gameId")
+        if game_id_present and (not isinstance(raw_game_id, str) or not raw_game_id.strip()):
+            raise ValidationBlocked(
+                "ANALYTICS_MALFORMED", f"gameId must be nonblank for {link['href']}"
+            )
+        if not isinstance(state, str) or not state.strip():
+            reason = "DUP_ALIAS_STATE_BLANK" if not game_id_present else "ANALYTICS_MALFORMED"
+            raise ValidationBlocked(reason, f"gameState must be nonblank for {link['href']}")
+        alternate_game_id = analytics.get("gameID")
+        if alternate_game_id is not None and (
+            not isinstance(alternate_game_id, str) or not alternate_game_id.strip()
+        ):
+            raise ValidationBlocked(
+                "ANALYTICS_MALFORMED", f"gameID must be nonblank for {link['href']}"
+            )
+        records.append({
+            "record_type": "complete_record" if game_id_present else "sparse_alias_record",
+            "href": link["href"],
+            "away_team": key[0],
+            "home_team": key[1],
+            "pair": key,
+            "game_id": raw_game_id.strip() if game_id_present else None,
+            "alternate_game_id": (
+                alternate_game_id.strip() if isinstance(alternate_game_id, str) else None
+            ),
+            "state": state.strip().upper(),
+            "declared_teams": declared_teams,
+            "analytics_sha256": sha256_bytes(decoded.encode("utf-8")),
+        })
+
+    if not records:
+        raise ValidationBlocked(
+            "OFFICIAL_RECORDS_UNAVAILABLE",
+            f"no official regular-season week {week} game records were parsed",
+        )
+
+    complete_records = [record for record in records if record["game_id"] is not None]
+    complete_by_id: dict[str, list[dict[str, Any]]] = {}
+    for record in complete_records:
+        complete_by_id.setdefault(record["game_id"], []).append(record)
+    for game_id, matches in complete_by_id.items():
+        if len(matches) > 1 and len({record["pair"] for record in matches}) > 1:
+            raise ValidationBlocked(
+                "DUP_GAMEID_NOT_WEEK_UNIQUE",
+                f"gameId {game_id!r} appears in multiple selected-week pairs",
+            )
+
+    sparse_records = [record for record in records if record["game_id"] is None]
+    for alias in sparse_records:
+        hint = alias["alternate_game_id"]
+        if hint and hint in complete_by_id:
+            target = complete_by_id[hint][0]
+            shared_fields = set(alias["declared_teams"]) & set(target["declared_teams"])
+            declared_mismatch = any(
+                alias["declared_teams"][field] != target["declared_teams"][field]
+                for field in shared_fields
+            )
+            if (
+                alias["href"] != target["href"]
+                or alias["pair"] != target["pair"]
+                or declared_mismatch
+            ):
+                raise ValidationBlocked(
+                    "DUP_HREF_OR_TEAM_MISMATCH",
+                    f"sparse alias for {hint!r} disagrees with its complete link",
+                )
+        elif hint:
+            same_pair_ids = {
+                record["game_id"]
+                for record in complete_records
+                if record["pair"] == alias["pair"]
+            }
+            if same_pair_ids:
+                raise ValidationBlocked(
+                    "UNEXPECTED_EXTRA_LINK",
+                    f"sparse alias identity {hint!r} does not match {sorted(same_pair_ids)}",
+                )
+
+    by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for record in records:
+        by_pair.setdefault(record["pair"], []).append(record)
+
+    games: list[dict[str, Any]] = []
+    for key in sorted(by_pair):
+        pair_records = by_pair[key]
+        complete = [record for record in pair_records if record["game_id"] is not None]
+        sparse = [record for record in pair_records if record["game_id"] is None]
+        if len(sparse) > 1:
+            raise ValidationBlocked(
+                "DUP_TWO_SPARSE", f"more than one sparse alias for {key[0]} at {key[1]}"
+            )
+        if not complete:
+            raise ValidationBlocked(
+                "DUP_ALIAS_ONLY", f"sparse alias has no complete link for {key[0]} at {key[1]}"
+            )
+        if len(complete) > 1:
+            ids = {record["game_id"] for record in complete}
+            reason = "DUP_DISTINCT_NONNULL_IDS" if len(ids) > 1 else "DUP_TWO_COMPLETE"
+            raise ValidationBlocked(
+                reason, f"more than one complete link for {key[0]} at {key[1]}"
+            )
+
+        authoritative = complete[0]
+        evidence = [
+            _scoreboard_evidence_record(
+                authoritative, role="complete_record", alias_counted_as_game=True
+            )
+        ]
+        if sparse:
+            alias = sparse[0]
+            if alias["state"] != authoritative["state"]:
+                raise ValidationBlocked(
+                    "DUP_STATE_MISMATCH",
+                    f"sparse alias state disagrees for {key[0]} at {key[1]}",
+                )
+            shared_fields = set(alias["declared_teams"]) & set(authoritative["declared_teams"])
+            if (
+                alias["href"] != authoritative["href"]
+                or alias["away_team"] != authoritative["away_team"]
+                or alias["home_team"] != authoritative["home_team"]
+                or any(
+                    alias["declared_teams"][field]
+                    != authoritative["declared_teams"][field]
+                    for field in shared_fields
+                )
+            ):
+                raise ValidationBlocked(
+                    "DUP_HREF_OR_TEAM_MISMATCH",
+                    f"sparse alias identity disagrees for {key[0]} at {key[1]}",
+                )
+            evidence.append(
+                _scoreboard_evidence_record(
+                    alias,
+                    role=f"alias_of:{authoritative['game_id']}",
+                    alias_counted_as_game=False,
+                )
+            )
+        games.append({
+            "away_team": key[0],
+            "home_team": key[1],
+            "state": authoritative["state"],
+            "official_game_id": authoritative["game_id"],
+            "game_center_url": f"https://www.nfl.com{authoritative['href']}",
+            "parser_evidence": evidence,
+        })
+    return games
+
+
+def parse_official_scoreboard(
+    document: str,
+    season: int,
+    week: int,
+    *,
+    contract_version: str = CONTRACT_VERSION,
+) -> list[dict[str, Any]]:
+    """Parse official Game Center links under an explicit versioned contract."""
+
+    if contract_version == LEGACY_SCOREBOARD_CONTRACT_VERSION:
+        return _parse_official_scoreboard_v1_2_1(document, season, week)
+    if contract_version != CONTRACT_VERSION:
+        raise ValueError(f"unsupported scoreboard contract version: {contract_version}")
+    return _parse_official_scoreboard_v1_3_0(document, season, week)
 
 
 def normalize_player_week(weekly: pl.DataFrame, season: int, week: int) -> tuple[pl.DataFrame, int]:
@@ -399,6 +670,11 @@ def validate_complete_week(
         "player_week": normalized,
         "scheduled_game_count": schedule_week.height,
         "official_final_game_count": len(official_games),
+        "official_parser_evidence": [
+            evidence
+            for game in official_games
+            for evidence in game.get("parser_evidence", [])
+        ],
         "published_player_game_count": len(player_game_ids),
         "excluded_null_player_id_rows": excluded_null_ids,
         "bye_policy": "NO_SYNTHETIC_GAMES",
@@ -686,6 +962,8 @@ def build_manifest(
             "official_scoreboard": {
                 "reference": sources.input_references["official_scoreboard"],
                 "sha256": sha256_bytes(sources.official_html.encode("utf-8")),
+                "parser_rule_id": SCOREBOARD_RULE_ID,
+                "parser_evidence": validation["official_parser_evidence"],
             },
         },
         "game_coverage": {
