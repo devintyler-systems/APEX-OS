@@ -1,10 +1,10 @@
 # In-Season Official Scoreboard Source Contract v1.3.0 Addendum
 
-Artifact: `in-season-official-scoreboard-source-contract`  
-Type: structural  
-Rule ID: `SB-DUP-EXC-1`  
-Base contract: `docs/in_season_source_contract_v1.md` (`v1.2.1`)  
-Parser version: `1.2.0`  
+Artifact: `in-season-official-scoreboard-source-contract`
+Type: structural
+Rule ID: `SB-DUP-EXC-1`
+Base contract: `docs/in_season_source_contract_v1.md` (`v1.2.1`)
+Parser version: `1.2.0`
 Schema version: `1.2.1` (unchanged)
 
 This addendum narrows what constitutes a repeated official record. It does not weaken final-state, schedule-coverage, reconciliation, freshness, immutable-run, degraded-mode, or stale-banner gates. All v1.2.1 rules remain effective except the repeated-link interpretation replaced below.
