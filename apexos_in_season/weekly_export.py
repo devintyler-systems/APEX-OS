@@ -26,9 +26,11 @@ from .source_probe import deterministic_frame_digest
 
 
 CONTRACT_VERSION = "1.3.0"
-SCHEMA_VERSION = "1.2.1"
-PARSER_VERSION = "1.2.0"
+MANIFEST_SCHEMA_VERSION = "1.3.0"
+CSV_SCHEMA_VERSION = "1.2.1"
+PARSER_VERSION = "1.2.1"
 LEGACY_SCOREBOARD_CONTRACT_VERSION = "1.2.1"
+LEGACY_MANIFEST_SCHEMA_VERSION = "1.2.1"
 SCOREBOARD_RULE_ID = "SB-DUP-EXC-1"
 UNKNOWN = "UNKNOWN"
 
@@ -920,12 +922,34 @@ def build_manifest(
     correction_reason: str | None = None,
     publication_freshness: Mapping[str, Any] | None = None,
     cutoff_evidence: Mapping[str, str] | None = None,
+    scoreboard_contract_version: str = CONTRACT_VERSION,
 ) -> dict[str, Any]:
     schedule = validation["schedule"]
     players = validation["player_week"]
+    if scoreboard_contract_version == CONTRACT_VERSION:
+        manifest_schema_version = MANIFEST_SCHEMA_VERSION
+    elif scoreboard_contract_version == LEGACY_SCOREBOARD_CONTRACT_VERSION:
+        manifest_schema_version = LEGACY_MANIFEST_SCHEMA_VERSION
+    else:
+        raise ValueError(
+            f"unsupported scoreboard contract version: {scoreboard_contract_version}"
+        )
+    official_scoreboard_evidence = {
+        "reference": sources.input_references["official_scoreboard"],
+        "sha256": sha256_bytes(sources.official_html.encode("utf-8")),
+    }
+    if scoreboard_contract_version == CONTRACT_VERSION:
+        official_scoreboard_evidence.update({
+            "parser_rule_id": SCOREBOARD_RULE_ID,
+            "parser_evidence": [
+                evidence
+                for evidence in validation["official_parser_evidence"]
+                if evidence["record_type"] == "sparse_alias_record"
+            ],
+        })
     return {
-        "contract_version": CONTRACT_VERSION,
-        "schema_version": SCHEMA_VERSION,
+        "contract_version": scoreboard_contract_version,
+        "schema_version": manifest_schema_version,
         "parser_version": PARSER_VERSION,
         "run_id": run_id,
         "season": season,
@@ -959,12 +983,7 @@ def build_manifest(
                 "row_count": sources.weekly.height,
                 "normalized_sha256": deterministic_frame_digest(sources.weekly),
             },
-            "official_scoreboard": {
-                "reference": sources.input_references["official_scoreboard"],
-                "sha256": sha256_bytes(sources.official_html.encode("utf-8")),
-                "parser_rule_id": SCOREBOARD_RULE_ID,
-                "parser_evidence": validation["official_parser_evidence"],
-            },
+            "official_scoreboard": official_scoreboard_evidence,
         },
         "game_coverage": {
             "scheduled": validation["scheduled_game_count"],
@@ -1058,6 +1077,7 @@ def execute_export(
     cutoff_utc: str,
     supersedes_run_id: str | None = None,
     correction_reason: str | None = None,
+    scoreboard_contract_version: str = CONTRACT_VERSION,
 ) -> tuple[dict[str, Any], Path, bool]:
     if sources.selected_week != week:
         raise ValidationBlocked(
@@ -1078,7 +1098,12 @@ def execute_export(
     publication_freshness = validate_source_publication_metadata(
         sources.source_metadata, sources.retrieval_utc
     )
-    official_games = parse_official_scoreboard(sources.official_html, season, week)
+    official_games = parse_official_scoreboard(
+        sources.official_html,
+        season,
+        week,
+        contract_version=scoreboard_contract_version,
+    )
     validation = validate_complete_week(
         sources.schedules, sources.weekly, official_games, season, week
     )
@@ -1099,9 +1124,14 @@ def execute_export(
             "reason": correction_reason,
         },
         "player_csv_sha256": sha256_bytes(player_csv),
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": (
+            MANIFEST_SCHEMA_VERSION
+            if scoreboard_contract_version == CONTRACT_VERSION
+            else LEGACY_MANIFEST_SCHEMA_VERSION
+        ),
+        "csv_schema_version": CSV_SCHEMA_VERSION,
         "parser_version": PARSER_VERSION,
-        "contract_version": CONTRACT_VERSION,
+        "contract_version": scoreboard_contract_version,
         "repository_sha": repository_head,
     }))
     run_id = f"v1-{fingerprint[:16]}"
@@ -1119,6 +1149,7 @@ def execute_export(
         correction_reason=correction_reason,
         publication_freshness=publication_freshness,
         cutoff_evidence=cutoff_evidence,
+        scoreboard_contract_version=scoreboard_contract_version,
     )
     manifest_path, replay = persist_validated_export(output_root, manifest, player_csv)
     return manifest, manifest_path, replay

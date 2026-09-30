@@ -52,4 +52,8 @@ Every reason blocks before persistence and leaves no export. Existing degraded-m
 
 ## Version and replay boundary
 
-This structural interpretation increments the contract from `1.2.1` to `1.3.0` and the parser from `1.1.0` to `1.2.0`. It does not change the `1.2.1` CSV schema. Contract and parser versions remain run-identity inputs, so a v1.3.0 run cannot reuse a v1.2.1 run identity or manifest.
+The initial structural interpretation increments the contract from `1.2.1` to `1.3.0` and the parser from `1.1.0` to `1.2.0`. This provenance-boundary correction increments the parser from `1.2.0` to `1.2.1` and the manifest schema from `1.2.1` to `1.3.0`. It does not change the `1.2.1` CSV schema. Contract, manifest-schema, CSV-schema, and parser versions remain run-identity inputs, so a v1.3.0 run cannot reuse a v1.2.1 run identity or manifest.
+
+## Manifest attribution boundary
+
+The export path carries an explicit scoreboard-contract mode through parsing, run identity, and manifest construction. Contract `1.3.0` manifests use manifest schema `1.3.0`, identify `parser_rule_id=SB-DUP-EXC-1`, and list only applied sparse-alias evidence in `parser_evidence`; a complete-only scoreboard therefore emits an empty list. Legacy contract `1.2.1` manifests use manifest schema `1.2.1` and emit neither attribution field. This boundary prevents a legacy replay from being labelled with parser evidence that its selected contract did not produce.

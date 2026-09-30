@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +13,10 @@ import pytest
 
 from apexos_in_season.weekly_export import (
     CONTRACT_VERSION,
+    CSV_SCHEMA_VERSION,
     LEGACY_SCOREBOARD_CONTRACT_VERSION,
+    MANIFEST_SCHEMA_VERSION,
+    PARSER_VERSION,
     PLAYER_WEEK_COLUMNS,
     SCOREBOARD_RULE_ID,
     RetrievedSources,
@@ -612,12 +616,48 @@ def test_manifest_has_separate_gates_no_derived_denominators_and_blocked_team_ta
     assert manifest["week_completeness_status"] == "PASS"
     assert manifest["official_record_reconciliation_status"] == "PASS"
     assert manifest["export_validation_status"] == "PASS"
+    assert manifest["contract_version"] == CONTRACT_VERSION
+    assert manifest["schema_version"] == MANIFEST_SCHEMA_VERSION == "1.3.0"
+    assert CSV_SCHEMA_VERSION == "1.2.1"
+    assert PARSER_VERSION == "1.2.1"
     assert manifest["derived_fields"] == []
     assert manifest["denominator_policy"] == "NOT_APPLICABLE_NO_DERIVED_FIELDS"
     assert manifest["tables"]["team_week"]["status"] == "BLOCKED"
     scoreboard = manifest["source_evidence"]["official_scoreboard"]
     assert scoreboard["parser_rule_id"] == SCOREBOARD_RULE_ID
-    assert len(scoreboard["parser_evidence"]) == 2
+    assert scoreboard["parser_evidence"] == []
+
+
+def test_current_manifest_lists_sparse_alias_evidence(tmp_path):
+    alias = (
+        '<a href="/games/lions-at-bills-2026-reg-2" '
+        'data-analytics="{&quot;gameID&quot;:&quot;official-1&quot;,'
+        '&quot;gameState&quot;:&quot;FINAL&quot;}">alias</a>'
+    )
+    sources = replace(_sources(), official_html=_official_html() + alias)
+    manifest, _, _ = execute_export(
+        sources=sources, reconciliation_evidence=_evidence(), season=2026, week=2,
+        output_root=tmp_path, repository_root=tmp_path, cutoff_utc=NOW,
+    )
+    scoreboard = manifest["source_evidence"]["official_scoreboard"]
+    assert scoreboard["parser_rule_id"] == SCOREBOARD_RULE_ID
+    assert len(scoreboard["parser_evidence"]) == 1
+    assert scoreboard["parser_evidence"][0]["record_type"] == "sparse_alias_record"
+    assert scoreboard["parser_evidence"][0]["role"] == "alias_of:official-1"
+    assert scoreboard["parser_evidence"][0]["alias_counted_as_game"] is False
+
+
+def test_legacy_manifest_uses_v1_2_1_schema_without_current_parser_attribution(tmp_path):
+    manifest, _, _ = execute_export(
+        sources=_sources(), reconciliation_evidence=_evidence(), season=2026, week=2,
+        output_root=tmp_path, repository_root=tmp_path, cutoff_utc=NOW,
+        scoreboard_contract_version=LEGACY_SCOREBOARD_CONTRACT_VERSION,
+    )
+    assert manifest["contract_version"] == LEGACY_SCOREBOARD_CONTRACT_VERSION
+    assert manifest["schema_version"] == "1.2.1"
+    scoreboard = manifest["source_evidence"]["official_scoreboard"]
+    assert "parser_rule_id" not in scoreboard
+    assert "parser_evidence" not in scoreboard
 
 
 def test_freeze_and_replay_detects_corrections_or_corruption(tmp_path):
